@@ -143,7 +143,7 @@ def measurement_update(sensor_var, p_cov_check, y_k, p_check, v_check, q_check):
     # 3.3 Correct predicted state
     p_hat = p_check + es[:3]
     v_hat = v_check + es[3:6]
-    q_hat = Quaternion(axis_angle=es[6:]).quat_mult_right(q_check)
+    q_hat = Quaternion(axis_angle=es[6:]).quat_mult_left(q_check)
     # 3.4 Compute corrected covariance
     p_cov_hat = (np.eye(9) - K @ h_jac) @ p_cov_check
     return p_hat, v_hat, q_hat, p_cov_hat
@@ -154,16 +154,40 @@ def measurement_update(sensor_var, p_cov_check, y_k, p_check, v_check, q_check):
 # Now that everything is set up, we can start taking in the sensor data and creating estimates
 # for our state in a loop.
 ################################################################################################
+
 for k in range(1, imu_f.data.shape[0]):  # start at 1 b/c we have initial prediction from gt
     delta_t = imu_f.t[k] - imu_f.t[k - 1]
 
     # 1. Update state with IMU inputs
-
+    C_ns = Quaternion(*q_est[k-1]).to_mat()
+    p_est[k] = p_est[k-1] + delta_t * v_est[k-1] + 0.5 * (delta_t ** 2) * (C_ns @ imu_f.data[k-1] + g)
+    v_est[k] = v_est[k-1] + delta_t * (C_ns @ imu_f.data[k-1] + g)
+    q_est[k] = Quaternion(euler = delta_t * imu_w.data[k-1]).quat_mult_right(q_est[k-1])
+    
     # 1.1 Linearize the motion model and compute Jacobians
+    F = np.eye(9)
+    imu = imu_f.data[k-1].reshape((3,1))
+    F[0:3,3:6] = delta_t * np.eye(3)
+    F[3:6,6:9] = -delta_t * skew_symmetric(C_ns @ imu_f.data[k-1])
+
+    Q = np.eye(6)
+    Q[0:3,0:3] = var_imu_f * Q[0:3,0:3]
+    Q[3:6,3:6] = var_imu_w * Q[3:6,3:6]
+    Q = (delta_t ** 2) * Q
 
     # 2. Propagate uncertainty
+    p_cov[k] = F @ p_cov[k-1] @ F.T + l_jac @ Q @ l_jac.T
 
     # 3. Check availability of GNSS and LIDAR measurements
+    for i in range(len(gnss.t)):
+        if abs(gnss.t[i] - imu_f.t[k]) < 0.01:
+            p_est[k], v_est[k], q_est[k], p_cov[k] = measurement_update(var_gnss, p_cov[k],
+                                                    gnss.data[i], p_est[k], v_est[k], q_est[k])
+    
+    for i in range(len(lidar.t)):
+        if abs(lidar.t[i] - imu_f.t[k]) < 0.01:
+            p_est[k], v_est[k], q_est[k], p_cov[k] = measurement_update(var_lidar, p_cov[k],
+                                                    lidar.data[i], p_est[k], v_est[k], q_est[k])
 
     # Update states (save)
 
